@@ -44,6 +44,12 @@ class CandlingDataCollector:
         self.slider_vars = {}
         self.cap = None
         
+        # --- AI THRESHOLD VARIABLES ---
+        self.conf_var = tk.DoubleVar(value=0.25)
+        self.conf_str = tk.StringVar(value="0.25")
+        self.iou_var = tk.DoubleVar(value=0.45)
+        self.iou_str = tk.StringVar(value="0.45")
+        
         # Thread control flags and locks
         self.running = True
         self.latest_raw_frame = None       # Keep original clean frame for pristine saving
@@ -67,7 +73,7 @@ class CandlingDataCollector:
             self.cap.release()
             time.sleep(0.1)
 
-        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # change camera
+        self.cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)  # change camera
         
         try:
             w_str, h_str = self.res_var.get().split('x')
@@ -215,7 +221,27 @@ class CandlingDataCollector:
         for text, val in classes:
             tk.Radiobutton(meta_frame, text=text, variable=self.class_label, value=val, bg="#f5f6fa", font=("Arial", 9)).pack(anchor="w", pady=2)
 
-        # --- MODULE 5: PRODUCTION RUN CAPTURE BUTTON ---
+        # --- MODULE 5: AI INFERENCE THRESHOLDS ---
+        ai_frame = tk.LabelFrame(self.sidebar, text=" 5. AI Inference Thresholds ", font=("Arial", 10, "bold"), bg="#f5f6fa", fg="#2f3640", padx=10, pady=10)
+        ai_frame.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(ai_frame, text="Confidence Threshold (Min Score):", bg="#f5f6fa", font=("Arial", 9, "bold")).pack(anchor="w")
+        conf_box = tk.Frame(ai_frame, bg="#f5f6fa")
+        conf_box.pack(fill=tk.X, pady=(0, 2))
+        self.conf_scale = ttk.Scale(conf_box, from_=0.05, to=0.95, variable=self.conf_var, orient=tk.HORIZONTAL, 
+                                    command=lambda v: self.conf_str.set(f"{float(v):.2f}"))
+        self.conf_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        tk.Label(ai_frame, textvariable=self.conf_str, bg="#f5f6fa", font=("Arial", 9, "bold"), fg="#2f3640").pack(anchor="e")
+
+        tk.Label(ai_frame, text="IoU Threshold (NMS Overlap):", bg="#f5f6fa", font=("Arial", 9, "bold")).pack(anchor="w", pady=(8,0))
+        iou_box = tk.Frame(ai_frame, bg="#f5f6fa")
+        iou_box.pack(fill=tk.X, pady=(0, 2))
+        self.iou_scale = ttk.Scale(iou_box, from_=0.05, to=0.95, variable=self.iou_var, orient=tk.HORIZONTAL,
+                                   command=lambda v: self.iou_str.set(f"{float(v):.2f}"))
+        self.iou_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        tk.Label(ai_frame, textvariable=self.iou_str, bg="#f5f6fa", font=("Arial", 9, "bold"), fg="#2f3640").pack(anchor="e")
+
+        # --- MODULE 6: PRODUCTION RUN CAPTURE BUTTON ---
         self.snap_btn = tk.Button(
             self.sidebar, text="📸 CAPTURE CLEAN SAMPLE\n[ Spacebar Key ]", font=("Arial", 11, "bold"),
             bg="#2cf43b", fg="#1e272e", activebackground="#219653", activeforeground="white",
@@ -340,8 +366,12 @@ class CandlingDataCollector:
             if self.cap and self.cap.isOpened():
                 ret, frame = self.cap.read()
                 if ret:
+                    # Fetch current threshold values from UI
+                    conf = self.conf_var.get()
+                    iou = self.iou_var.get()
+                    
                     # Run YOLOv8 detection in the background thread to prevent UI lag
-                    results = self.model(frame, verbose=False)
+                    results = self.model(frame, conf=conf, iou=iou, verbose=False)
                     annotated_frame = results[0].plot()
 
                     with self.frame_lock:
