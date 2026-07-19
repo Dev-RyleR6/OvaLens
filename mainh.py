@@ -54,6 +54,8 @@ class CandlingDataCollector:
         self.running = True
         self.latest_raw_frame = None       # Keep original clean frame for pristine saving
         self.latest_annotated_frame = None # Keep inference frame for smooth UI display
+        self.latest_detection_boxes = []   # YOLO boxes in raw frame coordinates
+        self.preview_image_bounds = None    # Displayed image bounds inside the Tk label
         self.frame_lock = threading.Lock()
         self.props_lock = threading.Lock()
         self.pending_props = {}
@@ -73,7 +75,7 @@ class CandlingDataCollector:
             self.cap.release()
             time.sleep(0.1)
 
-        self.cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)  # change camera
+        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # change camera
         
         try:
             w_str, h_str = self.res_var.get().split('x')
@@ -96,6 +98,8 @@ class CandlingDataCollector:
         with self.frame_lock:
             self.latest_raw_frame = None
             self.latest_annotated_frame = None
+            self.latest_detection_boxes = []
+            self.preview_image_bounds = None
         success = self.init_camera()
         if success:
             for prop_id, (var_obj, _) in self.slider_vars.items():
@@ -118,6 +122,8 @@ class CandlingDataCollector:
         
         self.video_label = tk.Label(self.preview_frame, bg="black")
         self.video_label.grid(row=0, column=0, sticky="nsew")
+        self.video_label.bind("<Button-1>", self.on_video_click)
+        self.video_label.configure(cursor="crosshair")
 
         self.flash_banner = tk.Label(self.preview_frame, text="✔ RAW IMAGE SAVED TO DATASET", font=("Arial", 14, "bold"), 
                                      bg="#2ed573", fg="white", pady=12)
@@ -355,6 +361,36 @@ class CandlingDataCollector:
         with self.props_lock:
             self.pending_props[prop_id] = value
 
+    def focus_to_max_on_detection(self):
+        self.break_focus_loop()
+        max_focus = 1023
+        self.focus_var.set(max_focus)
+        self.queue_property(cv2.CAP_PROP_FOCUS, max_focus)
+
+    def on_video_click(self, event):
+        with self.frame_lock:
+            bounds = self.preview_image_bounds
+            boxes = list(self.latest_detection_boxes)
+
+        if not bounds or not boxes:
+            return
+
+        offset_x, offset_y, display_w, display_h, frame_w, frame_h = bounds
+        if not (offset_x <= event.x <= offset_x + display_w and offset_y <= event.y <= offset_y + display_h):
+            return
+
+        scale_x = frame_w / display_w
+        scale_y = frame_h / display_h
+        frame_x = (event.x - offset_x) * scale_x
+        frame_y = (event.y - offset_y) * scale_y
+
+        tapped_boxes = [
+            box for box in boxes
+            if box[0] <= frame_x <= box[2] and box[1] <= frame_y <= box[3]
+        ]
+        if tapped_boxes:
+            self.focus_to_max_on_detection()
+
     def bg_video_loop(self):
         while self.running:
             with self.props_lock:
@@ -372,11 +408,14 @@ class CandlingDataCollector:
                     
                     # Run YOLOv8 detection in the background thread to prevent UI lag
                     results = self.model(frame, conf=conf, iou=iou, verbose=False)
-                    annotated_frame = results[0].plot()
+                    result = results[0]
+                    annotated_frame = result.plot()
+                    boxes = result.boxes.xyxy.cpu().numpy().tolist() if result.boxes is not None else []
 
                     with self.frame_lock:
                         self.latest_raw_frame = frame.copy()
                         self.latest_annotated_frame = annotated_frame
+                        self.latest_detection_boxes = boxes
                 else:
                     time.sleep(0.01)
             else:
@@ -387,8 +426,8 @@ class CandlingDataCollector:
             frame = self.latest_annotated_frame.copy() if self.latest_annotated_frame is not None else None
 
         if frame is not None:
-            win_w = max(self.preview_frame.winfo_width(), 10)
-            win_h = max(self.preview_frame.winfo_height(), 10)
+            win_w = max(self.video_label.winfo_width(), 10)
+            win_h = max(self.video_label.winfo_height(), 10)
             
             h, w = frame.shape[:2]
             scale = min(win_w / w, win_h / h)
@@ -397,12 +436,19 @@ class CandlingDataCollector:
             new_h = int(h * scale)
             
             if new_w > 10 and new_h > 10:
+                label_w = max(self.video_label.winfo_width(), 10)
+                label_h = max(self.video_label.winfo_height(), 10)
+                offset_x = max((label_w - new_w) // 2, 0)
+                offset_y = max((label_h - new_h) // 2, 0)
+
                 frame_resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                 rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(rgb)
                 imgtk = ImageTk.PhotoImage(image=img)
                 self.video_label.imgtk = imgtk
                 self.video_label.configure(image=imgtk)
+                with self.frame_lock:
+                    self.preview_image_bounds = (offset_x, offset_y, new_w, new_h, w, h)
 
         if self.running:
             self.root.after(16, self.update_preview)
